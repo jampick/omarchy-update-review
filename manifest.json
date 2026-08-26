@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "jampick.system-update",
-  "name": "System update",
+  "name": "Update Review",
   "version": "1.1.0",
   "author": "jampick",
   "license": "MIT",
@@ -13,10 +13,13 @@
     "barWidget": "SystemUpdate.qml"
   },
   "barWidget": {
-    "displayName": "System update",
+    "displayName": "Update Review",
     "description": "Appears when Omarchy is behind. Left click reviews every pending package with versions, download size, and whether a reboot follows. Right click updates straight away.",
     "category": "System",
-    "aliases": ["update", "updates"],
+    "aliases": [
+      "update",
+      "updates"
+    ],
     "allowMultiple": false,
     "defaultSection": "center",
     "defaults": {
