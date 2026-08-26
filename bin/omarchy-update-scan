@@ -70,6 +70,15 @@ capped() {
 
 # --- pending repo packages -------------------------------------------------
 
+# $CHECKUPDATES_DB is a predictable shared temporary path. Nothing read from it
+# can change what an update installs, because omarchy-update goes through the
+# real pacman database and never this one. But a directory owned by somebody
+# else could still put misleading versions and sizes in front of a decision, so
+# refuse it rather than render it.
+if [[ -e $CHECKUPDATES_DB && ! -O $CHECKUPDATES_DB ]]; then
+  bail "The temporary package database is not owned by you. Refusing to read it."
+fi
+
 capped "$workdir/updates" "$MAX_LIST_BYTES" timeout 120 checkupdates --nocolor "${sync_args[@]}"
 rc=$?
 # 0 = updates found, 2 = system is current. Anything else is a real failure,

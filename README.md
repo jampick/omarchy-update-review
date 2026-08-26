@@ -92,6 +92,13 @@ packages. Hitting the cap is reported as a readable error rather than as
 truncated JSON, because half a JSON document parses as nothing useful and would
 look like a bug in the panel.
 
+**It refuses a temporary database it does not own.** `$CHECKUPDATES_DB` is a
+predictable shared path under `/tmp`. Nothing read from it can change what an
+update installs, because `omarchy-update` goes through the real pacman database
+and never this one. But a directory owned by somebody else could still put
+misleading versions and sizes in front of a decision, so the scan checks
+ownership and refuses rather than renders.
+
 **It always answers.** Offline, missing `checkupdates`, a stalled mirror: every
 failure comes back as valid JSON carrying a sentence the panel shows you, never
 a stack trace and never an empty list pretending nothing is pending.
