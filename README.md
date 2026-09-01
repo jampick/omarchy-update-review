@@ -92,6 +92,25 @@ packages. Hitting the cap is reported as a readable error rather than as
 truncated JSON, because half a JSON document parses as nothing useful and would
 look like a bug in the panel.
 
+**Its rows are capped too, and it says so when they are.** Every row the scan
+prints becomes a `Repeater` delegate inside the shell, and the shell outlives
+the panel, so cardinality is bounded before the JSON is printed: 250 packages,
+100 AUR packages, 50 dev commits. Rows that change something currently running
+are ordered first, so a cap can only ever drop packages that land quietly on
+disk, never the kernel that makes the panel say REBOOT. The document carries
+`counts` and `omitted` alongside the trimmed lists, so the header still counts
+the whole update and the panel says out loud how many rows it is not showing.
+
+**Nothing renders as anything but text.** Package names, repositories and
+versions are the package's to choose. Every `Text` in the panel is
+`Text.PlainText`, and the two strings handed to shared components whose
+`textFormat` this plugin does not own (the panel header and the bar tooltip)
+are flattened in `Model.js` first. `Model.parseReport` is the single intake:
+it re-caps rows and string lengths, drops every field the panel does not draw,
+and reduces a tag to one of the exact two the panel knows how to render. The
+scan already does all of this, but the shell has to survive a document it did
+not produce.
+
 **It refuses a temporary database it does not own.** `$CHECKUPDATES_DB` is a
 predictable shared path under `/tmp`. Nothing read from it can change what an
 update installs, because `omarchy-update` goes through the real pacman database
@@ -140,8 +159,11 @@ On the widget's layout entry in `~/.config/omarchy/shell.json`:
 ./test/scan.test.sh
 ```
 
-Read-only against the real system. Asserts the JSON contract the panel depends
-on, and proves both byte caps actually fire and degrade to a readable error.
+Read-only against the real system, and it runs `test/model.test.js` too, so one
+command covers the scan and the intake that re-caps what it produces. Asserts
+the JSON contract the panel depends on, proves both byte caps fire and degrade
+to a readable error, and proves the row cap fires against a stub `checkupdates`
+without dropping a tagged row or undercounting the update.
 
 ## Layout
 
@@ -149,9 +171,10 @@ on, and proves both byte caps actually fire and degrade to a readable error.
 manifest.json            plugin manifest and settings schema
 SystemUpdate.qml         bar button and panel
 Service.qml              the two questions asked of the system, and caching
-Model.js                 formatting and grouping
+Model.js                 intake, formatting and grouping
 bin/omarchy-update-scan  read-only scan, emits JSON
-test/scan.test.sh        contract and cap tests
+test/scan.test.sh        contract and cap tests, runs the suite below too
+test/model.test.js       intake, caps and formatting
 ```
 
 ## Notes for hacking on it

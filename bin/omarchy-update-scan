@@ -12,6 +12,13 @@
 # reported as an error rather than as truncated JSON, because half a JSON
 # document parses as nothing useful and would look like a bug in the panel.
 #
+# Rows are capped as well as bytes. Every row printed here becomes a delegate
+# in the persistent shell, so cardinality is bounded before the JSON leaves
+# this process. Rows that change something currently running are ordered first
+# and so are never the ones dropped, and `counts` and `omitted` carry the true
+# totals so the panel can say how many it is not showing rather than quietly
+# understate the update.
+#
 # Usage: omarchy-update-scan [--nosync] [--no-aur]
 #   --nosync   reuse the last synced temporary database (no network)
 #   --no-aur   skip the AUR query even when foreign packages are installed
@@ -27,8 +34,15 @@ export CHECKUPDATES_DB="${CHECKUPDATES_DB:-${TMPDIR:-/tmp}/checkup-db-${UID}}"
 readonly MAX_LIST_BYTES=${OMARCHY_UPDATE_SCAN_MAX_LIST:-$((512 * 1024))}
 readonly MAX_OUTPUT_BYTES=${OMARCHY_UPDATE_SCAN_MAX_OUTPUT:-$((512 * 1024))}
 
+# Row caps. A full-system update after months away is a few hundred packages;
+# past that the list has stopped being something anyone reads row by row, and
+# the honest answer is a count plus a pointer at the terminal.
+readonly MAX_PACKAGE_ROWS=${OMARCHY_UPDATE_SCAN_MAX_ROWS:-250}
+readonly MAX_AUR_ROWS=${OMARCHY_UPDATE_SCAN_MAX_AUR_ROWS:-100}
+readonly MAX_DEV_ROWS=${OMARCHY_UPDATE_SCAN_MAX_DEV_ROWS:-50}
+
 workdir=$(mktemp -d) || {
-  printf '{"ok":false,"error":"Could not create a temporary directory.","omarchy":null,"dev":[],"packages":[],"aur":[],"totalBytes":0,"restartCount":0}\n'
+  printf '{"ok":false,"error":"Could not create a temporary directory.","omarchy":null,"dev":[],"packages":[],"aur":[],"totalBytes":0,"restartCount":0,"counts":{"packages":0,"aur":0,"dev":0},"omitted":{"packages":0,"aur":0,"dev":0}}\n'
   exit 0
 }
 trap 'rm -rf "$workdir"' EXIT
@@ -47,13 +61,15 @@ done
 bail() {
   jq -n --arg m "$1" '{
     ok: false, error: $m, omarchy: null, dev: [],
-    packages: [], aur: [], totalBytes: 0, restartCount: 0
+    packages: [], aur: [], totalBytes: 0, restartCount: 0,
+    counts: {packages: 0, aur: 0, dev: 0},
+    omitted: {packages: 0, aur: 0, dev: 0}
   }'
   exit 0
 }
 
 command -v jq >/dev/null 2>&1 || {
-  printf '{"ok":false,"error":"jq is not installed.","omarchy":null,"dev":[],"packages":[],"aur":[],"totalBytes":0,"restartCount":0}\n'
+  printf '{"ok":false,"error":"jq is not installed.","omarchy":null,"dev":[],"packages":[],"aur":[],"totalBytes":0,"restartCount":0,"counts":{"packages":0,"aur":0,"dev":0},"omitted":{"packages":0,"aur":0,"dev":0}}\n'
   exit 0
 }
 command -v checkupdates >/dev/null 2>&1 ||
@@ -216,24 +232,44 @@ if [[ $omarchy_path != "/usr/share/omarchy" && -d $omarchy_path/.git ]]; then
   if [[ -n ${upstream:-} ]]; then
     GIT_TERMINAL_PROMPT=0 timeout 10 git -C "$omarchy_path" fetch --quiet 2>/dev/null
     dev=$(git -C "$omarchy_path" log --format='%h%x09%s' "HEAD..$upstream" 2>/dev/null |
-      head -50 | cut -c1-200 | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") |
+      head -"$MAX_DEV_ROWS" | cut -c1-200 | jq -R -s 'split("\n") | map(select(length > 0) | split("\t") |
         {hash: .[0], subject: .[1]})')
     [[ -n $dev ]] || dev='[]'
   fi
 fi
 
+# Totals are taken from the full lists, then the lists are trimmed. The
+# summary line and the reboot warning stay true about the whole update even
+# when the panel is only showing the first few hundred rows of it.
 jq -n \
   --argjson omarchy "$omarchy_json" \
   --argjson packages "$packages" \
   --argjson aur "$aur" \
   --argjson dev "$dev" \
-  '{
+  --argjson maxPackages "$MAX_PACKAGE_ROWS" \
+  --argjson maxAur "$MAX_AUR_ROWS" \
+  --argjson maxDev "$MAX_DEV_ROWS" \
+  '
+  # Consequential rows first, so a cap can only ever drop rows that land
+  # quietly on disk, never the kernel that makes the panel say REBOOT.
+  ($packages | map(select(.tag != "")) + map(select(.tag == ""))) as $ordered |
+  {
     ok: true,
     error: null,
     omarchy: $omarchy,
-    dev: $dev,
-    packages: $packages,
-    aur: $aur,
+    dev: $dev[0:$maxDev],
+    packages: $ordered[0:$maxPackages],
+    aur: $aur[0:$maxAur],
+    counts: {
+      packages: ($packages | length),
+      aur: ($aur | length),
+      dev: ($dev | length)
+    },
+    omitted: {
+      packages: ([($packages | length) - $maxPackages, 0] | max),
+      aur: ([($aur | length) - $maxAur, 0] | max),
+      dev: ([($dev | length) - $maxDev, 0] | max)
+    },
     totalBytes: (($packages | map(.bytes) | add // 0)
                  + (if $omarchy == null then 0 else $omarchy.bytes end)),
     restartCount: ($packages | map(select(.tag != "")) | length)

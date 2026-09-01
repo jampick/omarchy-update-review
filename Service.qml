@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "Model.js" as Model
 
 // Owns the two questions the widget asks the system, and nothing else.
 //
@@ -10,6 +11,11 @@ import Quickshell.Io
 // Both are read-only. The scan syncs a throwaway pacman database, never the
 // real one, so nothing here can leave the system in a half-updated state or
 // take a lock a real pacman run needs.
+//
+// Neither answer is trusted as it arrives. Both go through Model, which caps
+// rows and string lengths and keeps only the fields the panel draws, so what
+// reaches `report` is already bounded before a Repeater can turn it into
+// delegates that outlive the panel.
 Item {
   id: root
 
@@ -60,7 +66,7 @@ Item {
     }
     onExited: function (exitCode) {
       root.updateAvailable = exitCode === 0
-      root.availableSummary = exitCode === 0 ? String(availableOut.text || "").trim() : ""
+      root.availableSummary = exitCode === 0 ? Model.plain(String(availableOut.text || "").trim(), 160) : ""
       // The check just synced the temporary database. Reading the detail now
       // is free, and it means the tooltip can say something true before the
       // panel is ever opened.
@@ -85,14 +91,15 @@ Item {
         root.scanFinished()
         return
       }
-      try {
-        var parsed = JSON.parse(text)
-        root.report = parsed
-        root.scanError = parsed.ok ? "" : (parsed.error || "Could not read pending updates.")
-        root.scannedAt = Date.now()
-      } catch (e) {
+      var parsed = Model.parseReport(text)
+      if (!parsed) {
         root.scanError = "Could not parse the update scan output."
+        root.scanFinished()
+        return
       }
+      root.report = parsed
+      root.scanError = parsed.ok ? "" : (parsed.error || "Could not read pending updates.")
+      root.scannedAt = Date.now()
       root.scanFinished()
     }
   }

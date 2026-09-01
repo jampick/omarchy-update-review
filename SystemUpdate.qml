@@ -184,7 +184,10 @@ Panel {
         // decision you came here to make should never be scrolled off screen.
         PanelHero {
           Layout.fillWidth: true
-          title: root.report && root.report.omarchy ? "Omarchy " + root.report.omarchy.from + " -> " + root.report.omarchy.to : (service.availableSummary !== "" ? service.availableSummary : "System update")
+          // Built in Model, not here: it is package-controlled version text
+          // going into a shared component whose textFormat this plugin does
+          // not own, so it is flattened before it gets there.
+          title: Model.heroTitle(root.report, service.availableSummary)
           meta: service.scanning && !root.hasData ? "Reading pending changes" : (root.hasData ? Model.summary(root.report) : "")
           detail: root.reboots ? "REBOOT" : ""
           foreground: root.foreground
@@ -193,6 +196,7 @@ Panel {
           iconComponent: Component {
             Text {
               text: ""
+              textFormat: Text.PlainText
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.display
@@ -223,6 +227,7 @@ Panel {
           Layout.fillWidth: true
           visible: text !== ""
           text: service.scanError
+          textFormat: Text.PlainText
           color: root.urgent
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -235,6 +240,7 @@ Panel {
           Layout.fillWidth: true
           visible: root.reboots
           text: "A new kernel or compositor is in this set. Omarchy will offer a reboot when it finishes."
+          textFormat: Text.PlainText
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.bodySmall
@@ -271,6 +277,7 @@ Panel {
               visible: root.hasData && Model.sections(root.report).length === 0
               width: parent.width
               text: "Nothing else is pending. Only Omarchy itself would change."
+              textFormat: Text.PlainText
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
@@ -295,6 +302,7 @@ Panel {
                   visible: modelData.note !== ""
                   width: parent.width
                   text: modelData.note
+                  textFormat: Text.PlainText
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -311,6 +319,20 @@ Panel {
                   }
                 }
               }
+            }
+
+            // A capped list has to admit it. The header above counts the whole
+            // update, so without this line the two quietly disagree.
+            Text {
+              visible: text !== ""
+              width: parent.width
+              text: root.hasData ? Model.omittedNote(root.report) : ""
+              textFormat: Text.PlainText
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+              topPadding: Style.space(2)
             }
           }
         }
@@ -338,6 +360,7 @@ Panel {
         Text {
           Layout.fillWidth: true
           text: "u update  .  r re-check  .  esc close"
+          textFormat: Text.PlainText
           color: Qt.darker(root.foreground, 2.0)
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -371,6 +394,7 @@ Panel {
 
         Text {
           text: changeRow.row ? changeRow.row.name : ""
+          textFormat: Text.PlainText
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -390,6 +414,7 @@ Panel {
             id: tagText
             anchors.centerIn: parent
             text: changeRow.row ? Model.tagLabel(changeRow.row.tag) : ""
+            textFormat: Text.PlainText
             color: changeRow.row && changeRow.row.tag === "reboot" ? root.urgent : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -398,6 +423,7 @@ Panel {
 
         Text {
           text: changeRow.row ? Model.rowMeta(changeRow.row) : ""
+          textFormat: Text.PlainText
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -408,6 +434,7 @@ Panel {
       Text {
         width: parent.width
         text: changeRow.row ? changeRow.row.from + " -> " + changeRow.row.to : ""
+        textFormat: Text.PlainText
         color: Qt.darker(root.foreground, 1.9)
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
