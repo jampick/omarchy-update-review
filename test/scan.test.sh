@@ -1,9 +1,12 @@
 #!/bin/bash
-# Shape and safety tests for bin/omarchy-update-scan.
+# Shape and safety tests for the update scan and the boundary it runs behind.
 #
 # These run against the real system, read-only. They assert the contract the
 # QML panel depends on: always valid JSON, always exit 0, always under the byte
-# and row caps that keep a runaway process from growing the shell.
+# and row caps that keep a runaway process from growing the shell. They also
+# assert the runtime boundary itself, because every property of it, the process
+# group, the deadline, the cap and the private database, is invisible in the
+# output and would rot without something exercising it.
 #
 # Model.js has its own suite next door; this file runs it too, so one command
 # covers the producer and the intake that re-caps what it produces.
@@ -112,6 +115,132 @@ check "the row cap is the one configured, not a hardcoded one" \
 missing=$(PATH=/nonexistent "$SCAN" --nosync --no-aur 2>/dev/null)
 check "says what is missing instead of dying when nothing is on PATH" \
   "jq -e '.ok == false and (.error | length) > 10' >/dev/null <<<\"\$missing\""
+
+# --- the boundary ----------------------------------------------------------
+#
+# The producers are trees, not processes. QML can only stop the child it
+# started, so the guarantee that a stopped scan is actually over lives here, in
+# a launcher that owns a process group. None of this shows up in the JSON, so
+# it is exercised directly.
+
+echo
+echo "omarchy-update-bounded"
+
+BOUNDED=./bin/omarchy-update-bounded
+
+b_out=$("$BOUNDED" 10 1000 -- echo hi)
+b_rc=$?
+check "passes a producer's output straight through" "[[ \$b_out == hi ]]"
+check "passes a producer's exit status straight through" "(( b_rc == 0 ))"
+
+"$BOUNDED" 10 1000 -- bash -c 'exit 7' >/dev/null 2>&1
+b_status=$?
+check "does not flatten a failure into a success" "(( b_status == 7 ))"
+
+b_capped=$("$BOUNDED" 10 100 -- yes 2>/dev/null)
+b_capped_rc=$?
+check "caps a producer that never stops talking" "(( \${#b_capped} <= 100 ))"
+check "says it hit the cap instead of passing off a truncated answer" \
+  "(( b_capped_rc == 125 ))"
+
+b_started=$SECONDS
+"$BOUNDED" 1 1000 -- sleep 60 >/dev/null 2>&1
+b_deadline_rc=$?
+check "stops a producer that overruns its deadline" "(( b_deadline_rc == 124 ))"
+check "and stops it at the deadline, not whenever it finishes" \
+  "(( SECONDS - b_started < 10 ))"
+
+# A tree three deep, so that killing the immediate child would visibly not be
+# enough. The marker is distinctive so pgrep cannot match anything else.
+{
+  echo '#!/bin/bash'
+  echo '( ( sleep 4747 & sleep 4747 ) & sleep 4747 ) &'
+  echo 'sleep 4747'
+} >"$stub/tree"
+chmod +x "$stub/tree"
+
+"$BOUNDED" 120 1000 -- "$stub/tree" >/dev/null 2>&1 &
+b_pid=$!
+sleep 1
+b_spawned=$(pgrep -fc 'sleep 4747')
+kill -TERM "$b_pid" 2>/dev/null
+wait "$b_pid" 2>/dev/null
+b_cancel_rc=$?
+b_left=$(pgrep -fc 'sleep 4747')
+pkill -f 'sleep 4747' 2>/dev/null
+
+check "the producer really did have descendants to lose" "(( b_spawned >= 3 ))"
+# Read immediately after wait returns: this asserts both that the group was
+# taken down and that cancellation waited for it rather than returning early.
+check "cancelling takes the whole process group, not just the child" \
+  "(( b_left == 0 ))"
+check "cancelling reports that it was cancelled" "(( b_cancel_rc == 143 ))"
+
+# --- the private package database ------------------------------------------
+#
+# checkupdates would otherwise sync into a predictable name in a directory the
+# whole machine can write to, and what it holds decides which versions and
+# sizes a person is shown before they agree to an update.
+
+echo
+echo "omarchy-update-db.sh"
+
+me=$(id -u)
+dbw=$stub/dbw
+mkdir -p "$dbw"
+
+db_line=$(source ./bin/omarchy-update-db.sh
+  resolve_update_db "$dbw" && printf '%s|%s' "$UPDATE_DB" "$UPDATE_DB_EPHEMERAL")
+db_path=${db_line%|*}
+db_mode=$(stat -c '%F %u %a' "$db_path" 2>/dev/null)
+
+check "resolves a database at all" "[[ -n \$db_path ]]"
+check "and one that is a real directory, owned by this user, private" \
+  "[[ \$db_mode == \"directory \$me 700\" ]]"
+
+ln -sfn /tmp "$stub/runtime-symlink"
+db_symlink=$(XDG_RUNTIME_DIR="$stub/runtime-symlink" bash -c \
+  'source ./bin/omarchy-update-db.sh; resolve_update_db "$1" && printf %s "$UPDATE_DB_EPHEMERAL"' _ "$dbw")
+check "refuses a runtime directory that is a symlink, and takes a fresh one" \
+  "[[ \$db_symlink == 1 ]]"
+
+mkdir -p "$stub/runtime/omarchy-update-review"
+chmod 700 "$stub/runtime"
+chmod 777 "$stub/runtime/omarchy-update-review"
+db_loose=$(XDG_RUNTIME_DIR="$stub/runtime" bash -c \
+  'source ./bin/omarchy-update-db.sh; resolve_update_db "$1" && printf %s "$UPDATE_DB_EPHEMERAL"' _ "$dbw")
+db_loose_mode=$(stat -c %a "$stub/runtime/omarchy-update-review")
+check "refuses a database directory left open to the group or the world" \
+  "[[ \$db_loose == 1 ]]"
+check "refuses it rather than tightening a directory it did not create" \
+  "[[ \$db_loose_mode == 777 ]]"
+
+shared=${TMPDIR:-/tmp}/checkup-db-$me
+shared_before=$(stat -c %Y "$shared" 2>/dev/null || echo none)
+"$SCAN" --nosync --no-aur >/dev/null
+shared_after=$(stat -c %Y "$shared" 2>/dev/null || echo none)
+check "a scan never touches the shared predictable database path" \
+  "[[ \$shared_before == \$shared_after ]]"
+
+# --- the producers, statically ---------------------------------------------
+
+echo
+echo "producers"
+
+check "the scan runs behind the boundary rather than as the shell's own child" \
+  "grep -qE '^[[:space:]]*exec .*omarchy-update-bounded' bin/omarchy-update-scan"
+check "the availability check does too" \
+  "grep -qE '^[[:space:]]*exec .*omarchy-update-bounded' bin/omarchy-update-check"
+check "no producer reaches for a shared temporary path" \
+  "! grep -hvE '^[[:space:]]*#' bin/omarchy-update-scan bin/omarchy-update-db.sh bin/omarchy-update-check | grep -q 'TMPDIR'"
+check "pacman -Si is given a deadline" \
+  "grep -qE 'timeout [0-9]+ pacman -Si' bin/omarchy-update-scan"
+check "pacman -Si is given an output cap" \
+  "grep -q 'MAX_SI_BYTES' bin/omarchy-update-scan"
+check "the shell asks the boundary for the availability answer, not the tool" \
+  "! grep -q 'omarchy-update-available' Service.qml"
+check "and the panel tells it where that boundary is" \
+  "grep -q 'omarchy-update-check' SystemUpdate.qml"
 
 # --- the panel, statically ---------------------------------------------------
 #

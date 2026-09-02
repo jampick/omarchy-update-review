@@ -77,6 +77,7 @@ Panel {
   Service {
     id: service
     scanPath: String(Qt.resolvedUrl("bin/omarchy-update-scan")).replace(/^file:\/\//, "")
+    checkPath: String(Qt.resolvedUrl("bin/omarchy-update-check")).replace(/^file:\/\//, "")
     staleAfterMs: Math.max(1, root.setting("staleAfterMinutes", 10)) * 60000
   }
 

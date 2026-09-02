@@ -19,13 +19,24 @@
 # totals so the panel can say how many it is not showing rather than quietly
 # understate the update.
 #
+# It re-execs itself through bin/omarchy-update-bounded, so the shell's child
+# is a boundary rather than this script: one process group, a deadline, and a
+# byte cap that hold for every descendant. Stopping the scan from QML stops the
+# whole tree of timeout, checkupdates, fakeroot, pacman, git, jq and awk, not
+# just whichever process the shell happens to have a handle on.
+#
 # Usage: omarchy-update-scan [--nosync] [--no-aur]
 #   --nosync   reuse the last synced temporary database (no network)
 #   --no-aur   skip the AUR query even when foreign packages are installed
 
 set -uo pipefail
 export LC_ALL=C
-export CHECKUPDATES_DB="${CHECKUPDATES_DB:-${TMPDIR:-/tmp}/checkup-db-${UID}}"
+
+# Resolved with parameter expansion rather than dirname, because this has to
+# hold even when the caller's PATH has nothing on it: that is one of the cases
+# this script promises to answer with JSON instead of a crash.
+here=${BASH_SOURCE[0]%/*}
+[[ $here == "${BASH_SOURCE[0]}" ]] && here=.
 
 # Generous next to real output (about 12 KiB for 51 pending packages) and small
 # next to anything that could hurt the shell.
@@ -40,6 +51,32 @@ readonly MAX_OUTPUT_BYTES=${OMARCHY_UPDATE_SCAN_MAX_OUTPUT:-$((512 * 1024))}
 readonly MAX_PACKAGE_ROWS=${OMARCHY_UPDATE_SCAN_MAX_ROWS:-250}
 readonly MAX_AUR_ROWS=${OMARCHY_UPDATE_SCAN_MAX_AUR_ROWS:-100}
 readonly MAX_DEV_ROWS=${OMARCHY_UPDATE_SCAN_MAX_DEV_ROWS:-50}
+
+# pacman -Si describes every pending package in full. It is streamed to a file
+# here rather than held, so this is a bound on how much work it may do, not on
+# memory, and it is generous next to the ~1 KiB per package it really prints.
+readonly MAX_SI_BYTES=${OMARCHY_UPDATE_SCAN_MAX_SI:-$((4 * 1024 * 1024))}
+
+# The whole scan, descendants included. Chosen to fire before the panel's own
+# watchdog, so the thing that gives up first is the one that can actually stop
+# the work rather than just stop waiting for it.
+readonly SCAN_DEADLINE=${OMARCHY_UPDATE_SCAN_DEADLINE:-150}
+
+# Establish the boundary, then come back through it. The cap given to the
+# launcher is deliberately looser than the one enforced below, so that a scan
+# that overruns is reported as the JSON error this script writes rather than as
+# a document the launcher cut in half.
+if [[ -z ${OMARCHY_UPDATE_BOUNDED:-} ]]; then
+  # Fail closed. An installation missing the launcher gets an error in the
+  # panel, not a scan that quietly runs with no boundary around it.
+  if [[ ! -x $here/omarchy-update-bounded ]]; then
+    printf '{"ok":false,"error":"The update scan is missing its process boundary. Reinstall the plugin.","omarchy":null,"dev":[],"packages":[],"aur":[],"totalBytes":0,"restartCount":0,"counts":{"packages":0,"aur":0,"dev":0},"omitted":{"packages":0,"aur":0,"dev":0}}\n'
+    exit 0
+  fi
+  export OMARCHY_UPDATE_BOUNDED=1
+  exec "$here/omarchy-update-bounded" \
+    "$SCAN_DEADLINE" "$((MAX_OUTPUT_BYTES + 4096))" -- "$0" "$@"
+fi
 
 workdir=$(mktemp -d) || {
   printf '{"ok":false,"error":"Could not create a temporary directory.","omarchy":null,"dev":[],"packages":[],"aur":[],"totalBytes":0,"restartCount":0,"counts":{"packages":0,"aur":0,"dev":0},"omitted":{"packages":0,"aur":0,"dev":0}}\n'
@@ -86,13 +123,19 @@ capped() {
 
 # --- pending repo packages -------------------------------------------------
 
-# $CHECKUPDATES_DB is a predictable shared temporary path. Nothing read from it
-# can change what an update installs, because omarchy-update goes through the
-# real pacman database and never this one. But a directory owned by somebody
-# else could still put misleading versions and sizes in front of a decision, so
-# refuse it rather than render it.
-if [[ -e $CHECKUPDATES_DB && ! -O $CHECKUPDATES_DB ]]; then
-  bail "The temporary package database is not owned by you. Refusing to read it."
+# The temporary database is this plugin's own, verified private directory, not
+# the shared predictable path checkupdates would pick by default. See
+# omarchy-update-db.sh for what is checked and why. When it has to fall back to
+# a fresh one there is no previous sync to reuse, so --nosync is not honourable
+# and is dropped rather than silently reporting a database with nothing in it.
+# shellcheck source=./omarchy-update-db.sh
+source "$here/omarchy-update-db.sh" 2>/dev/null ||
+  bail "The update scan is missing part of itself. Reinstall the plugin."
+resolve_update_db "$workdir" ||
+  bail "Could not create a private package database. Refusing to read a shared one."
+export CHECKUPDATES_DB=$UPDATE_DB
+if ((UPDATE_DB_EPHEMERAL)); then
+  sync_args=()
 fi
 
 capped "$workdir/updates" "$MAX_LIST_BYTES" timeout 120 checkupdates --nocolor "${sync_args[@]}"
@@ -121,6 +164,11 @@ done <"$workdir/updates"
 
 declare -A repo_of=() bytes_of=()
 if ((${#names[@]} > 0)); then
+  # Given the same deadline and cap as everything else. A package this misses
+  # keeps its name and both versions and loses only its size, which is
+  # decoration next to the decision the panel is there to support.
+  capped "$workdir/si" "$MAX_SI_BYTES" \
+    timeout 60 pacman -Si --dbpath "$CHECKUPDATES_DB" "${names[@]}"
   cur=""
   pending_repo=""
   while IFS= read -r line; do
@@ -148,7 +196,7 @@ if ((${#names[@]} > 0)); then
         cur=""
         ;;
     esac
-  done < <(pacman -Si --dbpath "$CHECKUPDATES_DB" "${names[@]}" 2>/dev/null)
+  done <"$workdir/si"
 fi
 
 # --- what a change actually costs you --------------------------------------

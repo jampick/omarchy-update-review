@@ -74,20 +74,40 @@ That backs up the folder first.
 
 ## Safety
 
-`bin/omarchy-update-scan` is the only thing that touches the system, and it is
-read-only.
+`bin/omarchy-update-scan` and `bin/omarchy-update-check` are the only things
+that touch the system, and both are read-only.
 
-**It never takes the pacman lock.** `checkupdates` syncs a throwaway database
-under `$CHECKUPDATES_DB`, never the real one, so the scan is safe to run while
-a real pacman is busy and cannot leave the system half-synced. Download sizes
-come from that same temporary database, because your real one has not been
-synced and still describes the versions already installed.
+**It never takes the pacman lock.** `checkupdates` syncs a throwaway database,
+never the real one, so the scan is safe to run while a real pacman is busy and
+cannot leave the system half-synced. Download sizes come from that same
+temporary database, because your real one has not been synced and still
+describes the versions already installed.
+
+**Everything runs inside a boundary, not just next to one.**
+`bin/omarchy-update-bounded` starts each producer as a process group of its
+own and gives it a deadline and a byte cap. This matters because QML can only
+stop the process it started, while both producers are trees: `timeout`,
+`checkupdates`, `fakeroot`, `pacman`, `git`, `jq`, `awk` and pipelines between
+them. Stopping the one child the shell has a handle on can leave the rest of
+that tree running after the panel has said it is done. Cancelling here signals
+the whole group and does not return until the group is gone, escalating from
+TERM to KILL if it has to. The deadline is held by a watchdog outside the group
+it guards, so the group stays bounded even if the launcher itself is killed.
+
+**The availability check is bounded too.** The icon is driven by
+`bin/omarchy-update-check`, not by `omarchy-update-available` directly, so the
+question that runs every few hours gets the same process group, deadline and
+cap as the detailed scan. It is also the run that syncs the temporary database,
+which is what keeps opening the panel off the network.
 
 **Its output is capped.** Everything the scan prints is collected by a QML
 `StdioCollector` inside the long-running shell process, and `StdioCollector`
 has no size limit of its own: it buffers a process to completion and then hands
-QML the lot. So the scan caps its own output at 512 KiB, in a separate process,
-before the shell ever sees it. Real output is about 12 KiB for fifty pending
+QML the lot, and a limit applied after that has already happened is not a
+limit. So both producers are capped in a separate process before the shell sees
+a byte: 512 KiB for the scan, 4 KiB for the availability check. The producer is
+closed down at the moment it exceeds the cap rather than merely ignored
+afterwards. Real output is about 12 KiB for fifty pending
 packages. Hitting the cap is reported as a readable error rather than as
 truncated JSON, because half a JSON document parses as nothing useful and would
 look like a bug in the panel.
@@ -117,12 +137,27 @@ with the panel open. Enter and Space do not activate anything. In a panel whose
 one action upgrades the whole system, a key you press to scroll or to answer
 something else should never be the key that starts it.
 
-**It refuses a temporary database it does not own.** `$CHECKUPDATES_DB` is a
-predictable shared path under `/tmp`. Nothing read from it can change what an
-update installs, because `omarchy-update` goes through the real pacman database
-and never this one. But a directory owned by somebody else could still put
-misleading versions and sizes in front of a decision, so the scan checks
-ownership and refuses rather than renders.
+**Its temporary database is private, and verified rather than assumed.**
+`checkupdates` would sync into `${TMPDIR:-/tmp}/checkup-db-$UID`: a predictable
+name in a directory the whole machine can write to. Nothing read from it can
+change what an update installs, because `omarchy-update` goes through the real
+pacman database and never this one, but it does decide which versions and sizes
+you are shown before you agree to an update, and a decision input should not be
+a name another process can reach first. So this plugin uses its own database
+under `$XDG_RUNTIME_DIR`, which your login session creates `0700` and owns, and
+checks every component of it with `lstat` for being a real directory, owned by
+you, with no group or other bits: a symlink is rejected outright. A component
+that fails the check is refused, never repaired, because repairing a path
+somebody else prepared is how you end up owning their symlink. If the runtime
+directory is unavailable it falls back to a freshly created private directory
+per run, which is correct but has no previous sync to reuse. See
+`bin/omarchy-update-db.sh`.
+
+**Every external call has a deadline.** `checkupdates`, the AUR helper, `git
+fetch` and `pacman -Si` each run under `timeout`, inside the process group
+above, under the overall scan deadline. A package the `pacman -Si` stage misses
+keeps its name and both versions and loses only its size, which is decoration
+next to the decision the panel exists to support.
 
 **It always answers.** Offline, missing `checkupdates`, a stalled mirror: every
 failure comes back as valid JSON carrying a sentence the panel shows you, never
@@ -171,6 +206,14 @@ the JSON contract the panel depends on, proves both byte caps fire and degrade
 to a readable error, and proves the row cap fires against a stub `checkupdates`
 without dropping a tagged row or undercounting the update.
 
+It also exercises the runtime boundary directly, because none of it shows up in
+the output and it would rot without something holding it: that cancelling the
+launcher takes a three-deep process tree with it and does not return early,
+that the deadline and the byte cap fire and report themselves distinctly, that
+a producer's exit status survives, that the database resolver refuses a
+symlinked runtime directory and a world-writable one without tightening
+either, and that a scan never touches the shared predictable path.
+
 ## Layout
 
 ```
@@ -179,6 +222,9 @@ SystemUpdate.qml         bar button and panel
 Service.qml              the two questions asked of the system, and caching
 Model.js                 intake, formatting and grouping
 bin/omarchy-update-scan  read-only scan, emits JSON
+bin/omarchy-update-check bounded availability check, drives the icon
+bin/omarchy-update-bounded  process group, deadline and byte cap for both
+bin/omarchy-update-db.sh verified private pacman database, shared by both
 test/scan.test.sh        contract and cap tests, runs the suite below too
 test/model.test.js       intake, caps and formatting
 ```

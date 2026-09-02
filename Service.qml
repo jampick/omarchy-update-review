@@ -5,8 +5,15 @@ import "Model.js" as Model
 
 // Owns the two questions the widget asks the system, and nothing else.
 //
-//   omarchy-update-available   is Omarchy behind? (drives whether the icon shows)
+//   bin/omarchy-update-check   is Omarchy behind? (drives whether the icon shows)
 //   bin/omarchy-update-scan    what exactly would change? (drives the panel)
+//
+// Neither is run directly. Both go through bin/omarchy-update-bounded, which
+// gives each one a process group, a deadline and a byte cap of its own. That
+// matters because a Process here can only stop the child it started, while
+// both producers are trees of timeout, checkupdates, pacman, git, jq and awk;
+// and because StdioCollector has no size limit, so a cap applied on this side
+// would already have buffered whatever it was meant to be limiting.
 //
 // Both are read-only. The scan syncs a throwaway pacman database, never the
 // real one, so nothing here can leave the system in a half-updated state or
@@ -20,6 +27,7 @@ Item {
   id: root
 
   property string scanPath: ""
+  property string checkPath: ""
   property int staleAfterMs: 10 * 60 * 1000
 
   property bool updateAvailable: false
@@ -38,6 +46,8 @@ Item {
   // freshly synced as a side effect, which is why the scan that follows can
   // skip its own sync and cost nothing.
   function checkAvailable() {
+    if (checkPath === "")
+      return
     if (!availableProc.running)
       availableProc.running = true
   }
@@ -59,7 +69,7 @@ Item {
   Process {
     id: availableProc
     running: false
-    command: ["omarchy-update-available"]
+    command: [root.checkPath]
     stdout: StdioCollector {
       id: availableOut
       waitForEnd: true
@@ -85,6 +95,14 @@ Item {
     }
     onExited: function (exitCode) {
       root.scanning = false
+      // 124 and 125 are the boundary's, not the scan's. The scan always exits
+      // 0 with a JSON sentence explaining itself, so these two mean it was
+      // stopped rather than that it answered, and there is nothing to parse.
+      if (exitCode === 124 || exitCode === 125) {
+        root.scanError = "The update check timed out. Try refreshing."
+        root.scanFinished()
+        return
+      }
       var text = String(scanOut.text || "").trim()
       if (text === "") {
         root.scanError = "The update scan returned nothing."
@@ -104,10 +122,13 @@ Item {
     }
   }
 
-  // Watchdog. A mirror that accepts the connection and then stalls would
-  // otherwise leave the panel spinning with no way back to a usable state.
+  // Backstop only. The scan carries its own deadline, and that one can
+  // actually stop the work rather than just stop waiting for it, so it is set
+  // to fire first. This is here for the case where the process never reports
+  // at all, which would otherwise leave the panel spinning with no way back to
+  // a usable state.
   Timer {
-    interval: 150000
+    interval: 170000
     running: root.scanning
     repeat: false
     onTriggered: {
