@@ -37,7 +37,6 @@ Panel {
   readonly property var report: service.report
   readonly property bool hasData: report && report.ok
   readonly property bool reboots: Model.needsReboot(report)
-  property bool cursorActive: false
 
   function runUpdate() {
     if (bar)
@@ -65,7 +64,6 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
-    cursorActive = false
     if (panelFlick)
       panelFlick.contentY = 0
     // Cached results are shown immediately; a stale cache refreshes behind
@@ -158,12 +156,16 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       onMoveRequested: function (dx, dy) {
-        root.cursorActive = true
         if (dy !== 0)
           root.scrollBy(dy)
       }
-      onActivateRequested: if (root.cursorActive)
-        root.runUpdate()
+      // Deliberately no onActivateRequested. Enter and Space both arrive here,
+      // and in a panel whose only action upgrades the whole system, neither is
+      // a gesture anyone means. The arrows here scroll the list rather than
+      // move a cursor between controls, so there is nothing for Enter to
+      // activate anyway: reading the list would have been the thing that armed
+      // it. `u` stays the keyboard path, it is a deliberate letter and the
+      // footer says so.
       onCloseRequested: root.close()
       onTabRequested: function (direction) {
         root.switchPanel(direction)
@@ -347,14 +349,10 @@ Panel {
           text: root.hasData ? "Update now" : "Update now (unreviewed)"
           iconText: ""
           bordered: true
-          hasCursor: root.cursorActive
           foreground: root.foreground
           fontFamily: root.fontFamily
           tooltipText: "Runs omarchy-update in a terminal"
           onClicked: root.runUpdate()
-          onHovered: function (on) {
-            root.cursorActive = on
-          }
         }
 
         Text {

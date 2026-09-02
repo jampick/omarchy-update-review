@@ -111,6 +111,12 @@ and reduces a tag to one of the exact two the panel knows how to render. The
 scan already does all of this, but the shell has to survive a document it did
 not produce.
 
+**Nothing but a deliberate gesture starts an update.** There are three ways in
+and no others: right click the bar icon, click **Update now**, or press `u`
+with the panel open. Enter and Space do not activate anything. In a panel whose
+one action upgrades the whole system, a key you press to scroll or to answer
+something else should never be the key that starts it.
+
 **It refuses a temporary database it does not own.** `$CHECKUPDATES_DB` is a
 predictable shared path under `/tmp`. Nothing read from it can change what an
 update installs, because `omarchy-update` goes through the real pacman database

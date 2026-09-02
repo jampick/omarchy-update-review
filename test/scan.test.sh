@@ -113,6 +113,23 @@ missing=$(PATH=/nonexistent "$SCAN" --nosync --no-aur 2>/dev/null)
 check "says what is missing instead of dying when nothing is on PATH" \
   "jq -e '.ok == false and (.error | length) > 10' >/dev/null <<<\"\$missing\""
 
+# --- the panel, statically ---------------------------------------------------
+#
+# Two properties of SystemUpdate.qml that no unit test can reach but that both
+# came out of marketplace review, so they are worth a guard against quietly
+# coming back.
+
+echo
+echo "SystemUpdate.qml"
+
+# The binding, not the comment explaining why there is not one.
+check "nothing keyboard-activates the update" \
+  "! grep -qE '^[[:space:]]*onActivateRequested' SystemUpdate.qml"
+check "the update has exactly three ways to start: right click, u, the button" \
+  "(( \$(grep -c 'root.runUpdate()' SystemUpdate.qml) == 3 ))"
+check "every Text in the panel renders as plain text" \
+  "(( \$(grep -cE '^[[:space:]]*Text \{[[:space:]]*\$' SystemUpdate.qml) == \$(grep -c 'textFormat: Text.PlainText' SystemUpdate.qml) ))"
+
 # --- the intake next door --------------------------------------------------
 
 echo

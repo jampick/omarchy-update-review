@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jampick.system-update",
   "name": "Update Review",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "jampick",
   "license": "MIT",
   "description": "Shows exactly which packages an update would change, and what it will ask for afterwards, before you start it.",
