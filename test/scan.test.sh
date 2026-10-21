@@ -222,6 +222,56 @@ shared_after=$(stat -c %Y "$shared" 2>/dev/null || echo none)
 check "a scan never touches the shared predictable database path" \
   "[[ \$shared_before == \$shared_after ]]"
 
+# --- one database, three widgets -----------------------------------------
+#
+# One copy of the widget runs per monitor and every copy's timer starts with the
+# shell, so their checks land on the database together. The stub stands in for
+# pacman's own lock: a second checkupdates while one is running fails exactly
+# the way the real one did, with "Cannot fetch updates".
+
+echo
+echo "omarchy-update-check"
+
+rt=$stub/rt-check
+mkdir -p "$rt"
+chmod 700 "$rt"
+lockstub=$stub/fake-pacman-lock
+cstub=$stub/check-bin
+mkdir -p "$cstub"
+cat >"$cstub/checkupdates" <<STUB
+#!/bin/bash
+mkdir "$lockstub" 2>/dev/null || { echo "==> ERROR: Cannot fetch updates" >&2; exit 1; }
+sleep 0.3
+rmdir "$lockstub"
+echo "omarchy 4.0.0-1 -> 9.9.9-1"
+STUB
+chmod +x "$cstub/checkupdates"
+
+race=""
+for i in 1 2 3; do
+  (PATH="$cstub:$PATH" XDG_RUNTIME_DIR=$rt ./bin/omarchy-update-check >/dev/null 2>&1; echo $? >"$stub/race.$i") &
+done
+wait
+race=$(cat "$stub"/race.1 "$stub"/race.2 "$stub"/race.3 | tr -d '\n')
+check "three checks at once all get the answer, none loses the race" "[[ \$race == 000 ]]"
+
+fstub=$stub/fail-bin
+mkdir -p "$fstub"
+printf '#!/bin/bash\necho "==> ERROR: Cannot fetch updates" >&2\nexit 1\n' >"$fstub/checkupdates"
+chmod +x "$fstub/checkupdates"
+PATH="$fstub:$PATH" XDG_RUNTIME_DIR=$rt ./bin/omarchy-update-check >/dev/null 2>&1
+fail_rc=$?
+check "a fetch that fails is 3, never 1, so it cannot read as up to date" "(( fail_rc == 3 ))"
+
+sync=$rt/omarchy-update-review/checkup-db/sync
+mkdir -p "$sync/download-old" "$sync/download-new" "$sync/download-full"
+touch "$sync/download-full/partial"
+touch -d '2 hours ago' "$sync/download-old" "$sync/download-full"
+PATH="$cstub:$PATH" XDG_RUNTIME_DIR=$rt ./bin/omarchy-update-check >/dev/null 2>&1
+check "clears pacman's abandoned empty download directories" "[[ ! -d \$sync/download-old ]]"
+check "but leaves a recent one, which may be a download in flight" "[[ -d \$sync/download-new ]]"
+check "and never one with anything in it" "[[ -f \$sync/download-full/partial ]]"
+
 # --- the producers, statically ---------------------------------------------
 
 echo

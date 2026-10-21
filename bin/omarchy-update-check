@@ -16,7 +16,10 @@
 # scan that follows reuses that sync, which is what keeps opening the panel off
 # the network.
 #
-# Exit status is omarchy-update-available's own: 0 means an update is waiting.
+# Exit status is omarchy-update-available's own, 0 when an update is waiting
+# and 1 when Omarchy is current, or 3 when the check could not tell: no route
+# to the mirrors, or another copy of the widget held the database too long.
+# The widget keeps what it last knew on 3 rather than reading it as current.
 
 set -uo pipefail
 
@@ -27,18 +30,28 @@ readonly MAX_CHECK_BYTES=${OMARCHY_UPDATE_CHECK_MAX_OUTPUT:-4096}
 readonly CHECK_DEADLINE=${OMARCHY_UPDATE_CHECK_DEADLINE:-90}
 
 if [[ -z ${OMARCHY_UPDATE_BOUNDED:-} ]]; then
-  [[ -x $here/omarchy-update-bounded ]] || exit 1
+  [[ -x $here/omarchy-update-bounded ]] || exit 3
   export OMARCHY_UPDATE_BOUNDED=1
   exec "$here/omarchy-update-bounded" "$CHECK_DEADLINE" "$MAX_CHECK_BYTES" -- "$0" "$@"
 fi
 
-workdir=$(mktemp -d) || exit 1
+workdir=$(mktemp -d) || exit 3
 trap 'rm -rf "$workdir"' EXIT
 
 # shellcheck source=./omarchy-update-db.sh
-source "$here/omarchy-update-db.sh" || exit 1
-resolve_update_db "$workdir" || exit 1
+source "$here/omarchy-update-db.sh" || exit 3
+resolve_update_db "$workdir" || exit 3
 export CHECKUPDATES_DB=$UPDATE_DB
+lock_update_db 60 || exit 3
+
+# omarchy-update-available throws checkupdates' errors away and reports "up to
+# date" when it could not fetch, which the widget used to believe and hide its
+# icon over. So the sync happens here first, where a failure can be seen:
+# checkupdates exits 1 on failure, 0 or 2 when it answered. The second sync
+# inside omarchy-update-available then finds every database current.
+timeout 60 checkupdates --nocolor >/dev/null 2>&1
+rc=$?
+(( rc == 0 || rc == 2 )) || exit 3
 
 # omarchy-update-available runs under `set -u` and reads OMARCHY_PATH
 # unguarded, so it is given the same default the scan uses.

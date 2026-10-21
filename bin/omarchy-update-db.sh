@@ -58,3 +58,28 @@ resolve_update_db() {
   UPDATE_DB_EPHEMERAL=1
   return 0
 }
+
+# Serialise everything that syncs or reads the database. One copy of the widget
+# runs per monitor, and every copy's timer starts with the shell, so three
+# checks land on the same database in the same second. pacman's own lock then
+# fails two of them with "Cannot fetch updates", omarchy-update-available reads
+# that as "up to date", and the copy that lost hides its icon. Losing pacman
+# lock races also left pacman's download-* scratch directories behind, two per
+# tick for weeks. Waiting here turns the race into a queue: the second and
+# third copies sync a database that is already current, which costs one
+# conditional request per repository.
+#
+# Holds fd 9 for the rest of the caller's life. Returns 1 if the lock could not
+# be taken in time, which the caller reports as a failed check, not an answer.
+lock_update_db() {
+  local wait=${1:-60} lockfile=${UPDATE_DB%/*}/update.lock
+
+  exec 9>>"$lockfile" || return 1
+  flock -w "$wait" 9 || return 1
+
+  # Left by pacman runs that were stopped before they could clean up. Only
+  # empty ones, and only old ones, so a download in flight is never touched.
+  find "$UPDATE_DB/sync" -maxdepth 1 -type d -name 'download-*' -empty -mmin +30 \
+    -delete 2>/dev/null
+  return 0
+}

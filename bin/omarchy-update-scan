@@ -134,6 +134,10 @@ source "$here/omarchy-update-db.sh" 2>/dev/null ||
 resolve_update_db "$workdir" ||
   bail "Could not create a private package database. Refusing to read a shared one."
 export CHECKUPDATES_DB=$UPDATE_DB
+# Shared with the availability check, so a panel opened on one monitor while
+# another monitor's copy is checking waits its turn instead of failing the sync.
+lock_update_db 45 ||
+  bail "Another update check is still running. Try refreshing in a minute."
 if ((UPDATE_DB_EPHEMERAL)); then
   sync_args=()
 fi

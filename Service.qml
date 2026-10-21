@@ -75,6 +75,16 @@ Item {
       waitForEnd: true
     }
     onExited: function (exitCode) {
+      // Only 0 and 1 are answers. Anything else (3 from the check, 124 and
+      // 125 from the boundary) means it could not tell, and the icon keeps
+      // what it last knew. Reading those as "current" is what used to hide a
+      // waiting update until the next tick, on whichever monitors lost the
+      // race for the database.
+      if (exitCode !== 0 && exitCode !== 1) {
+        retryTimer.restart()
+        return
+      }
+      retryTimer.stop()
       root.updateAvailable = exitCode === 0
       root.availableSummary = exitCode === 0 ? Model.plain(String(availableOut.text || "").trim(), 160) : ""
       // The check just synced the temporary database. Reading the detail now
@@ -83,6 +93,17 @@ Item {
       if (root.updateAvailable)
         root.scan(false)
     }
+  }
+
+  // Short, because a failed check is nearly always a passing condition: a
+  // network that has not come up yet after resume, or a mirror having a bad
+  // minute. Waiting a full interval for the next try is how an update sat
+  // unannounced for a day.
+  Timer {
+    id: retryTimer
+    interval: 15 * 60 * 1000
+    repeat: false
+    onTriggered: root.checkAvailable()
   }
 
   Process {
