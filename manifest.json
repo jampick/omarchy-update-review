@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "jampick.system-update",
   "name": "Update Review",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "author": "jampick",
   "license": "MIT",
-  "description": "Shows exactly which packages an update would change, and what it will ask for afterwards, before you start it.",
+  "description": "Shows exactly which packages an update would change, and what it will ask for afterwards, before you start it. Can also flag new posts on omarchy.org/news.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Update Review",
-    "description": "Appears when Omarchy is behind. Left click reviews every pending package with versions, download size, and whether a reboot follows. Right click updates straight away.",
+    "description": "Appears when Omarchy is behind, or when omarchy.org has posted news and news alerts are on. Left click reviews every pending package with versions, download size, and whether a reboot follows, filterable by name. Right click updates straight away.",
     "category": "System",
     "aliases": [
       "update",
@@ -24,7 +24,8 @@
     "defaultSection": "center",
     "defaults": {
       "checkIntervalHours": 6,
-      "staleAfterMinutes": 10
+      "staleAfterMinutes": 10,
+      "newsAlerts": "Off"
     },
     "schema": [
       {
@@ -46,6 +47,17 @@
         "step": 1,
         "defaultValue": 10,
         "description": "Opening the panel shows the cached list immediately. It only re-reads the mirrors if the cache is older than this."
+      },
+      {
+        "key": "newsAlerts",
+        "type": "enum",
+        "label": "News alerts",
+        "options": [
+          "Off",
+          "On"
+        ],
+        "defaultValue": "Off",
+        "description": "When On, a newspaper icon appears for unread posts on omarchy.org/news. The feed is checked on the same interval as updates, with an ETag, so a check that finds nothing new downloads nothing."
       }
     ]
   },

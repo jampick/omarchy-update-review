@@ -1,0 +1,159 @@
+#!/bin/bash
+# Report the latest posts from the official Omarchy news feed as JSON, and which
+# of them have not been read yet.
+#
+# Usage: omarchy-update-news [--cached | --mark-read]
+#   (none)       fetch the feed, then report
+#   --cached     report from the last fetch without touching the network, so a
+#                copy of the widget on another monitor can catch up after the
+#                news was marked read on this one
+#   --mark-read  record the newest post as read, then report
+#
+# The feed is fetched with its ETag, so a repeat check that finds nothing new
+# is a 304 with no body. omarchy.org posts a few times a month; a check every
+# few hours is a handful of conditional requests a day.
+#
+# Read state is a single number, the publish time of the newest post read, in
+# $XDG_STATE_HOME/omarchy-update-review/news-read. A post is unread when it is
+# newer than that. On the first run nothing has been read, and rather than
+# light up for the whole archive the newest post alone counts as unread.
+#
+# Everything here comes from the network, so it gets the same treatment as the
+# scan: it runs behind omarchy-update-bounded, the download and the output are
+# capped, every string is cut short and stripped of control characters, and a
+# link is only passed on when it points at omarchy.org over https. The panel
+# draws it all as plain text and runs Model's check on the link again before
+# opening anything.
+
+set -uo pipefail
+export LC_ALL=C
+
+here=${BASH_SOURCE[0]%/*}
+[[ $here == "${BASH_SOURCE[0]}" ]] && here=.
+
+readonly FEED_URL=${OMARCHY_UPDATE_NEWS_URL:-https://omarchy.org/news/rss.xml}
+readonly MAX_FEED_BYTES=$((2 * 1024 * 1024))
+readonly MAX_OUTPUT_BYTES=$((64 * 1024))
+readonly MAX_ITEMS=10
+readonly NEWS_DEADLINE=45
+
+empty='{"ok":false,"error":"","unread":0,"items":[]}'
+
+if [[ -z ${OMARCHY_UPDATE_BOUNDED:-} ]]; then
+  if [[ ! -x $here/omarchy-update-bounded ]]; then
+    printf '%s\n' "$empty"
+    exit 0
+  fi
+  export OMARCHY_UPDATE_BOUNDED=1
+  exec "$here/omarchy-update-bounded" "$NEWS_DEADLINE" "$MAX_OUTPUT_BYTES" -- "$0" "$@"
+fi
+
+bail() {
+  jq -nc --arg m "$1" '{ok: false, error: $m, unread: 0, items: []}'
+  exit 0
+}
+
+mode=fetch
+case ${1:-} in
+  --cached) mode=cached ;;
+  --mark-read) mode=mark ;;
+  "") ;;
+  *) bail "Unknown option." ;;
+esac
+
+for tool in jq xmllint curl flock; do
+  command -v "$tool" >/dev/null 2>&1 || bail "$tool is not installed."
+done
+
+cache_dir=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-update-review
+state_dir=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-update-review
+mkdir -m 0700 -p -- "$cache_dir" "$state_dir" 2>/dev/null || bail "Could not create the news cache."
+
+feed=$cache_dir/news.xml
+etag=$cache_dir/news.etag
+read_file=$state_dir/news-read
+
+# One copy of the widget per monitor, all on the same timer. They take turns
+# so they never write the cache over each other.
+exec 9>>"$cache_dir/news.lock" || bail "Could not lock the news cache."
+flock -w 20 9 || bail "Another news check is still running."
+
+workdir=$(mktemp -d) || bail "Could not create a temporary directory."
+trap 'rm -rf "$workdir"' EXIT
+
+if [[ $mode == fetch ]]; then
+  # The ETag is only sent when there is a cached body for it to describe.
+  # Otherwise a 304 would leave nothing to read.
+  etag_args=()
+  [[ -s $feed && -s $etag ]] && etag_args=(--etag-compare "$etag")
+
+  code=$(curl --silent --show-error --location --proto '=https' --proto-redir '=https' \
+    --max-time 20 --max-filesize "$MAX_FEED_BYTES" \
+    "${etag_args[@]}" --etag-save "$workdir/etag" \
+    --output "$workdir/feed" --write-out '%{http_code}' \
+    -- "$FEED_URL" 2>/dev/null)
+
+  if [[ $code == 200 && -s $workdir/feed ]]; then
+    # Only a document that parses replaces the one already cached. A captive
+    # portal page or a half-finished deploy keeps the last good feed in place.
+    if xmllint --nonet --noout "$workdir/feed" 2>/dev/null; then
+      mv -f -- "$workdir/feed" "$feed"
+      if [[ -s $workdir/etag ]]; then
+        mv -f -- "$workdir/etag" "$etag"
+      else
+        rm -f -- "$etag"
+      fi
+    fi
+  elif [[ $code != 304 && ! -s $feed ]]; then
+    bail "Could not reach omarchy.org."
+  fi
+fi
+
+[[ -s $feed ]] || bail "No news has been fetched yet."
+
+field() {
+  xmllint --nonet --xpath "string(($2)[1])" "$1" 2>/dev/null |
+    tr -d '\000-\010\013\014\016-\037\177' | tr '\n\t' '  ' | sed -E 's/^ +| +$//g' | cut -c1-"$3"
+}
+
+count=$(xmllint --nonet --xpath 'count(/rss/channel/item)' "$feed" 2>/dev/null)
+[[ $count =~ ^[0-9]+$ ]] || bail "The news feed could not be read."
+((count > MAX_ITEMS)) && count=$MAX_ITEMS
+
+: >"$workdir/items.tsv"
+for ((i = 1; i <= count; i++)); do
+  item="/rss/channel/item[$i]"
+  title=$(field "$feed" "$item/title" 200)
+  link=$(field "$feed" "$item/link" 300)
+  date=$(field "$feed" "$item/pubDate" 60)
+  summary=$(field "$feed" "$item/description" 300)
+  when=$(date -d "$date" +%s 2>/dev/null) || when=0
+  # Same rule Model.safeNewsLink applies on the QML side.
+  [[ $link =~ ^https://omarchy\.org/[A-Za-z0-9/._~%-]*$ ]] || link=""
+  [[ -n $title ]] || continue
+  printf '%s\t%s\t%s\t%s\n' "$when" "$title" "$link" "$summary" >>"$workdir/items.tsv"
+done
+
+items=$(jq -R -s 'split("\n") | map(select(length > 0) | split("\t") | {
+    date: (.[0] | tonumber? // 0), title: .[1], link: .[2], summary: (.[3] // "")
+  }) | sort_by(-.date)' <"$workdir/items.tsv")
+[[ -n $items ]] || items='[]'
+
+newest=$(jq '.[0].date // 0' <<<"$items")
+
+read_at=""
+[[ -f $read_file ]] && read_at=$(head -c 32 -- "$read_file" | tr -dc '0-9')
+if [[ -z $read_at ]]; then
+  # First run: everything but the newest post counts as already read.
+  read_at=$(jq '.[1].date // 0' <<<"$items")
+  printf '%s\n' "$read_at" >"$read_file"
+fi
+
+if [[ $mode == mark ]]; then
+  read_at=$newest
+  printf '%s\n' "$read_at" >"$read_file"
+fi
+
+jq -nc --argjson items "$items" --argjson readAt "$read_at" '
+  ($items | map(. + {unread: (.date > $readAt)})) as $all |
+  {ok: true, error: null, unread: ($all | map(select(.unread)) | length), items: $all}'

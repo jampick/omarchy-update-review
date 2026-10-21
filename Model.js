@@ -292,6 +292,133 @@ function tagLabel(tag) {
   return ""
 }
 
+// ---------------------------------------------------------------------------
+// Filter
+// ---------------------------------------------------------------------------
+
+// Narrow the sections to packages whose name contains every word typed, in any
+// order and any case, so "qt base" finds qt6-base. Sections left empty are
+// dropped. The section's own note goes with it, because a note about "these"
+// reads wrong over a list that is now somebody else's subset.
+function filterSections(list, query) {
+  var words = String(query || "").toLowerCase().split(/\s+/).filter(function (w) {
+    return w !== ""
+  })
+  if (words.length === 0)
+    return list || []
+  var out = []
+  for (var i = 0; i < (list || []).length; i++) {
+    var section = list[i]
+    var rows = (section.rows || []).filter(function (row) {
+      var name = String(row.name || "").toLowerCase()
+      return words.every(function (w) {
+        return name.indexOf(w) !== -1
+      })
+    })
+    if (rows.length > 0)
+      out.push({ title: section.title, note: "", rows: rows })
+  }
+  return out
+}
+
+function matchCount(list) {
+  var n = 0
+  for (var i = 0; i < (list || []).length; i++)
+    n += (list[i].rows || []).length
+  return n
+}
+
+// ---------------------------------------------------------------------------
+// News
+// ---------------------------------------------------------------------------
+
+var MAX_NEWS_ITEMS = 10
+var MAX_NEWS_RAW_CHARS = 64 * 1024
+
+// The only links the panel will hand to a browser. bin/omarchy-update-news
+// applies the same rule before printing; this is the shell not taking its word
+// for it.
+function safeNewsLink(value) {
+  var link = String(value === undefined || value === null ? "" : value)
+  return link.length <= 300 && /^https:\/\/omarchy\.org\/[A-Za-z0-9\/._~%-]*$/.test(link) ? link : ""
+}
+
+function parseNews(raw) {
+  var text = String(raw === undefined || raw === null ? "" : raw).trim()
+  if (text.length === 0 || text.length > MAX_NEWS_RAW_CHARS)
+    return null
+  var parsed
+  try {
+    parsed = JSON.parse(text)
+  } catch (e) {
+    return null
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+    return null
+  var items = []
+  var source = Array.isArray(parsed.items) ? parsed.items : []
+  for (var i = 0; i < source.length && items.length < MAX_NEWS_ITEMS; i++) {
+    var item = source[i]
+    if (!item || typeof item !== "object")
+      continue
+    var title = cleanString(item.title, 200)
+    if (title === "")
+      continue
+    items.push({
+      title: title,
+      summary: cleanString(item.summary, 300),
+      link: safeNewsLink(item.link),
+      date: counted(item.date),
+      unread: item.unread === true
+    })
+  }
+  return {
+    ok: parsed.ok === true,
+    error: cleanString(parsed.error, MAX_ERROR),
+    items: items,
+    unread: items.filter(function (item) {
+      return item.unread
+    }).length
+  }
+}
+
+function unreadNews(news) {
+  if (!news || !news.ok)
+    return []
+  return news.items.filter(function (item) {
+    return item.unread
+  })
+}
+
+var MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+// "15 Oct", in the bar clock's day-month order, with the year only when it is
+// not this one. `now` is a parameter so the tests do not depend on the date.
+function newsDate(seconds, now) {
+  if (!seconds)
+    return ""
+  var d = new Date(seconds * 1000)
+  var today = now ? new Date(now) : new Date()
+  var label = d.getDate() + " " + MONTHS[d.getMonth()]
+  return d.getFullYear() === today.getFullYear() ? label : label + " " + d.getFullYear()
+}
+
+function newsLine(count) {
+  if (count <= 0)
+    return ""
+  return count === 1 ? "1 new post on omarchy.org" : count + " new posts on omarchy.org"
+}
+
+// The icon now lights for either reason, so the tooltip has to say which.
+function barTooltip(data, loading, updateAvailable, newsCount) {
+  if (!updateAvailable)
+    return newsCount > 0 ? newsLine(newsCount) + ". Click to read." : ""
+  var line = tooltip(data, loading)
+  if (newsCount > 0)
+    line += " " + newsLine(newsCount) + "."
+  return line
+}
+
 // Node sees a plain script (the .pragma line is stripped by the test runner);
 // QML ignores this because `module` is undefined there.
 if (typeof module !== "undefined") {
@@ -309,6 +436,14 @@ if (typeof module !== "undefined") {
     sections: sections,
     rowMeta: rowMeta,
     tagLabel: tagLabel,
-    heroTitle: heroTitle
+    heroTitle: heroTitle,
+    filterSections: filterSections,
+    matchCount: matchCount,
+    safeNewsLink: safeNewsLink,
+    parseNews: parseNews,
+    unreadNews: unreadNews,
+    newsDate: newsDate,
+    newsLine: newsLine,
+    barTooltip: barTooltip
   }
 }

@@ -29,6 +29,10 @@ Left click opens a panel listing every pending change:
 - **Total package count and total download**
 - **AUR packages**, when any foreign packages are installed
 
+A filter box above the list narrows it to packages whose name contains every
+word you type, in any order, so `qt base` finds `qt6-base`. Press `/` to jump to
+it, `Enter` to hand the keys back to the list, and `Esc` to clear it.
+
 The two tags are not invented. They mirror what Omarchy's own
 `omarchy-update-restart` prompts for once the update finishes, so the panel
 promises exactly what the update will ask of you afterwards.
@@ -36,12 +40,32 @@ promises exactly what the update will ask of you afterwards.
 Right click still runs `omarchy-update` straight away, exactly as the stock
 icon did, so nothing you already have in your fingers stops working.
 
+## News alerts
+
+Off unless you turn them on. With `"newsAlerts": "On"` (see
+[Settings](#settings)) the widget also reads the feed behind
+[omarchy.org/news](https://omarchy.org/news/) and shows a newspaper icon when
+there is a post you have not read. The posts sit at the top of the same panel,
+above any packages. Click one to open it in your browser, and press `n` or
+**Mark read** to put the icon away until the next post. When an update and news
+are both waiting, you get the update arrows, and the tooltip mentions the news.
+
+On the first run only the newest post counts as unread, so turning this on does
+not dump the whole archive on you. What you have read is one timestamp in
+`~/.local/state/omarchy-update-review/news-read`. Delete it to start over.
+
+The feed is fetched with its ETag, so a check that finds nothing new is a 304
+with no body. Only `https://omarchy.org/` links are ever opened. The script
+drops anything else and the panel checks again before handing a link to
+`omarchy-launch-browser`.
+
 ## What it does not do
 
 - It never updates anything on its own.
-- It never nags. The icon still appears **only** when Omarchy itself is behind,
-  not whenever any package is pending. On Arch that would be most days, and an
-  icon that is always lit is an icon you stop reading.
+- It never nags. The update icon still appears **only** when Omarchy itself is
+  behind, not whenever any package is pending. On Arch that would be most days,
+  and an icon that is always lit is an icon you stop reading. News alerts are
+  opt-in and go away once read.
 - It never writes to your system. See [Safety](#safety).
 
 ## Install
@@ -69,6 +93,8 @@ That backs up the folder first.
 | Right click | Run `omarchy-update` straight away |
 | `u` | Update, from inside the panel |
 | `r` | Re-check the mirrors |
+| `/` | Filter the package list |
+| `n` | Mark news read |
 | Up / Down | Scroll the change list |
 | `Esc` | Close |
 
@@ -177,22 +203,38 @@ Run it yourself to see everything the panel sees:
 | Right after that check finds Omarchy behind | Free: reuses the database the check just synced |
 | Panel open, if the cache is older than `staleAfterMinutes` (default 10) | One sync, about 3 seconds |
 | The refresh button, or `r` | One sync |
+| A check that could not tell (mirror unreachable, database busy) | One retry 15 minutes later |
+| Every `checkIntervalHours`, with news alerts on | One conditional request to omarchy.org |
 
 Opening the panel shows the cached list immediately and refreshes behind it, so
 it is never a blank wait.
+
+There is one copy of the widget per monitor, and their timers fire together.
+Up to 1.3.0 their checks raced for the same pacman database: pacman's lock
+failed all but one with "Cannot fetch updates", `omarchy-update-available`
+reported that as "up to date", and the losing monitors hid the icon. On my
+three-monitor desk Omarchy 4.0.6 went unannounced on the main screen for 26
+hours that way, and each lost race left an empty `download-*` directory behind
+(326 of them in three weeks). Since 1.4.0 the checks queue on a lock file, a
+check that cannot tell exits 3 and the icon keeps what it last knew, and stale
+empty download directories get swept.
 
 ## Settings
 
 On the widget's layout entry in `~/.config/omarchy/shell.json`:
 
 ```json
-{ "id": "jampick.system-update", "checkIntervalHours": 6, "staleAfterMinutes": 10 }
+{ "id": "jampick.system-update", "checkIntervalHours": 6, "staleAfterMinutes": 10, "newsAlerts": "On" }
 ```
+
+`newsAlerts` is `"Off"` or `"On"`, the same shape as the shell's own on/off
+settings. It defaults to `"Off"`.
 
 ## Requirements
 
 `pacman-contrib` (for `checkupdates`) and `jq`. Both ship with Omarchy. Without
-`checkupdates` the panel says so rather than showing an empty list.
+`checkupdates` the panel says so rather than showing an empty list. News alerts
+also use `curl` and `xmllint` (from `libxml2`), which are on every Arch install.
 
 ## Tests
 
@@ -214,17 +256,25 @@ a producer's exit status survives, that the database resolver refuses a
 symlinked runtime directory and a world-writable one without tightening
 either, and that a scan never touches the shared predictable path.
 
+The availability check gets three runs at once against a stub `checkupdates`
+that fails the way pacman's lock does, and all three have to answer. A failing
+fetch has to exit 3 rather than 1. The news script runs in `--cached` mode
+against a fixture feed, so the suite never touches the network: newest-first
+order, first-run unread, mark-read, a later post coming back as unread, and a
+link off omarchy.org being dropped.
+
 ## Layout
 
 ```
 manifest.json            plugin manifest and settings schema
 SystemUpdate.qml         bar button and panel
-Service.qml              the two questions asked of the system, and caching
+Service.qml              the questions asked of the system, and caching
 Model.js                 intake, formatting and grouping
 bin/omarchy-update-scan  read-only scan, emits JSON
 bin/omarchy-update-check bounded availability check, drives the icon
 bin/omarchy-update-bounded  process group, deadline and byte cap for both
-bin/omarchy-update-db.sh verified private pacman database, shared by both
+bin/omarchy-update-db.sh verified private pacman database and its lock
+bin/omarchy-update-news  omarchy.org news feed, read state, emits JSON
 test/scan.test.sh        contract and cap tests, runs the suite below too
 test/model.test.js       intake, caps and formatting
 ```

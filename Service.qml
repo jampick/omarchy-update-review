@@ -3,10 +3,11 @@ import Quickshell
 import Quickshell.Io
 import "Model.js" as Model
 
-// Owns the two questions the widget asks the system, and nothing else.
+// Owns the questions the widget asks the system, and nothing else.
 //
 //   bin/omarchy-update-check   is Omarchy behind? (drives whether the icon shows)
 //   bin/omarchy-update-scan    what exactly would change? (drives the panel)
+//   bin/omarchy-update-news    anything unread on omarchy.org? (opt-in)
 //
 // Neither is run directly. Both go through bin/omarchy-update-bounded, which
 // gives each one a process group, a deadline and a byte cap of its own. That
@@ -40,7 +41,49 @@ Item {
 
   readonly property bool stale: !report || (Date.now() - scannedAt) > staleAfterMs
 
+  property string newsPath: ""
+  property bool newsEnabled: false
+  property var news: null
+  readonly property var unreadNews: newsEnabled ? Model.unreadNews(news) : []
+
   signal scanFinished()
+  signal newsMarkedRead()
+
+  // `mode` is "" to fetch, "--cached" to re-read the last fetch without the
+  // network, or "--mark-read". A request that arrives while one is running is
+  // kept, not dropped, because a mark-read lost behind a fetch would leave the
+  // icon lit for news already read.
+  property string pendingNewsMode: ""
+  property bool newsQueued: false
+
+  function checkNews(mode) {
+    if (newsPath === "" || (!newsEnabled && mode !== "--mark-read"))
+      return
+    if (newsProc.running) {
+      if (!newsQueued || mode === "--mark-read")
+        pendingNewsMode = mode || ""
+      newsQueued = true
+      return
+    }
+    newsProc.command = mode ? [newsPath, mode] : [newsPath]
+    newsProc.running = true
+  }
+
+  onNewsEnabledChanged: {
+    if (newsEnabled)
+      checkNews("")
+    else
+      news = null
+  }
+
+  // A setting that is already On when the widget loads never changes, so the
+  // handler above never fires, and the panel's first refresh can run before
+  // the binding has settled. Asked once more after load, so news shows up
+  // without waiting a whole interval.
+  Component.onCompleted: Qt.callLater(function () {
+    if (root.newsEnabled && !root.news)
+      root.checkNews("")
+  })
 
   // Cheap check: is the icon warranted at all. Leaves the temporary database
   // freshly synced as a side effect, which is why the scan that follows can
@@ -104,6 +147,32 @@ Item {
     interval: 15 * 60 * 1000
     repeat: false
     onTriggered: root.checkAvailable()
+  }
+
+  Process {
+    id: newsProc
+    running: false
+    command: []
+    stdout: StdioCollector {
+      id: newsOut
+      waitForEnd: true
+    }
+    onExited: function (exitCode) {
+      var marking = newsProc.command.length > 1 && newsProc.command[1] === "--mark-read"
+      var parsed = Model.parseNews(newsOut.text)
+      // A failed fetch keeps the posts already known, the same way a failed
+      // update check keeps the icon.
+      if (parsed && parsed.ok)
+        root.news = parsed
+      if (marking)
+        root.newsMarkedRead()
+      if (root.newsQueued) {
+        var next = root.pendingNewsMode
+        root.newsQueued = false
+        root.pendingNewsMode = ""
+        root.checkNews(next)
+      }
+    }
   }
 
   Process {

@@ -20,6 +20,10 @@ import "Model.js" as Model
 // The icon still appears only when Omarchy itself is behind. Showing it for
 // any pending package would light it up most days on Arch and cost it every
 // bit of the meaning it has now.
+//
+// With `newsAlerts` on, it also appears for an unread post on omarchy.org's
+// news feed, as a newspaper rather than the update arrows, so the two never
+// read as the same thing. Both share one panel: news on top, packages below.
 Panel {
   id: root
   // Kept as the built-in id on purpose: the shell routes IPC for a cloned
@@ -38,7 +42,19 @@ Panel {
   readonly property bool hasData: report && report.ok
   readonly property bool reboots: Model.needsReboot(report)
 
+  readonly property bool hasUpdate: service.updateAvailable
+  readonly property bool newsOn: root.setting("newsAlerts", "Off") === "On"
+  readonly property var unreadNews: service.unreadNews
+  readonly property int newsCount: unreadNews.length
+
+  property string filterText: ""
+  readonly property var allSections: root.hasData ? Model.sections(root.report) : []
+  readonly property var shownSections: Model.filterSections(allSections, filterText)
+  readonly property bool filtering: filterText.trim() !== ""
+
   function runUpdate() {
+    if (!hasUpdate)
+      return
     if (bar)
       bar.run("omarchy-launch-floating-terminal-with-presentation omarchy-update")
     close()
@@ -46,6 +62,24 @@ Panel {
 
   function refresh() {
     service.checkAvailable()
+    service.checkNews("")
+  }
+
+  // Another monitor's copy marked the news read. Re-read its record rather
+  // than fetch, so three monitors never mean three requests.
+  function refreshNews() {
+    service.checkNews("--cached")
+  }
+
+  function markNewsRead() {
+    if (newsCount > 0)
+      service.checkNews("--mark-read")
+  }
+
+  function openNews(link) {
+    var safe = Model.safeNewsLink(link)
+    if (safe !== "")
+      Util.execArgv(["omarchy-launch-browser", safe])
   }
 
   function clear() {
@@ -59,16 +93,18 @@ Panel {
     panelFlick.contentY = Math.max(0, Math.min(maxY, panelFlick.contentY + steps * Style.space(48)))
   }
 
-  visible: service.updateAvailable
+  visible: hasUpdate || newsCount > 0
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
     if (panelFlick)
       panelFlick.contentY = 0
+    filterField.text = ""
     // Cached results are shown immediately; a stale cache refreshes behind
     // them. Opening the panel should never be a blank three-second wait.
-    service.scanIfStale()
+    if (hasUpdate)
+      service.scanIfStale()
     Qt.callLater(function () {
       keyCatcher.forceActiveFocus()
     })
@@ -79,6 +115,9 @@ Panel {
     scanPath: String(Qt.resolvedUrl("bin/omarchy-update-scan")).replace(/^file:\/\//, "")
     checkPath: String(Qt.resolvedUrl("bin/omarchy-update-check")).replace(/^file:\/\//, "")
     staleAfterMs: Math.max(1, root.setting("staleAfterMinutes", 10)) * 60000
+    newsPath: String(Qt.resolvedUrl("bin/omarchy-update-news")).replace(/^file:\/\//, "")
+    newsEnabled: root.newsOn
+    onNewsMarkedRead: root.broadcastAll("refreshNews")
   }
 
   IpcHandler {
@@ -105,6 +144,9 @@ Panel {
     function clear(): void {
       root.broadcastAll("clear")
     }
+    function markNewsRead(): void {
+      root.markNewsRead()
+    }
   }
 
   // Panel has no broadcast() of its own (that lives on BarWidget), but a bar
@@ -130,13 +172,15 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: ""
+    text: root.hasUpdate ? "" : "\uf1ea"
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
     active: root.opened
-    tooltipText: Model.tooltip(root.report, service.scanning)
+    tooltipText: Model.barTooltip(root.report, service.scanning, root.hasUpdate, root.newsCount)
     onPressed: function (buttonCode) {
-      if (buttonCode === Qt.RightButton)
+      // Right click only ever means "update". With nothing to update it opens
+      // the panel like a left click, rather than doing nothing at all.
+      if (buttonCode === Qt.RightButton && root.hasUpdate)
         root.runUpdate()
       else
         root.toggle()
@@ -167,15 +211,23 @@ Panel {
       // activate anyway: reading the list would have been the thing that armed
       // it. `u` stays the keyboard path, it is a deliberate letter and the
       // footer says so.
+      //
+      // While the filter has focus every key goes to it, so typing a package
+      // with a "u" in its name can never start an update.
+      blocked: filterField.activeFocus
       onCloseRequested: root.close()
       onTabRequested: function (direction) {
         root.switchPanel(direction)
       }
       onTextKey: function (t) {
-        if (t === "r" || t === "R")
+        if (t === "/" && filterField.visible)
+          filterField.forceActiveFocus()
+        else if ((t === "r" || t === "R") && root.hasUpdate)
           service.scan(true)
         else if (t === "u" || t === "U")
           root.runUpdate()
+        else if (t === "n" || t === "N")
+          root.markNewsRead()
       }
 
       ColumnLayout {
@@ -190,15 +242,15 @@ Panel {
           // Built in Model, not here: it is package-controlled version text
           // going into a shared component whose textFormat this plugin does
           // not own, so it is flattened before it gets there.
-          title: Model.heroTitle(root.report, service.availableSummary)
-          meta: service.scanning && !root.hasData ? "Reading pending changes" : (root.hasData ? Model.summary(root.report) : "")
+          title: root.hasUpdate ? Model.heroTitle(root.report, service.availableSummary) : "Omarchy news"
+          meta: !root.hasUpdate ? Model.newsLine(root.newsCount) : (service.scanning && !root.hasData ? "Reading pending changes" : (root.hasData ? Model.summary(root.report) : ""))
           detail: root.reboots ? "REBOOT" : ""
           foreground: root.foreground
           fontFamily: root.fontFamily
 
           iconComponent: Component {
             Text {
-              text: ""
+              text: root.hasUpdate ? "" : "\uf1ea"
               textFormat: Text.PlainText
               color: root.foreground
               font.family: root.fontFamily
@@ -218,6 +270,7 @@ Panel {
             PanelActionButton {
               iconText: ""
               tooltipText: "Re-check the mirrors"
+              visible: root.hasUpdate
               enabled: !service.scanning
               foreground: root.foreground
               fontFamily: root.fontFamily
@@ -252,8 +305,40 @@ Panel {
 
         PanelSeparator {
           Layout.fillWidth: true
-          visible: root.hasData
+          visible: root.hasData || root.newsCount > 0
           foreground: root.foreground
+        }
+
+        // Pinned above the list rather than inside it, so it is still there
+        // after scrolling to the bottom of a two-hundred-package update.
+        TextField {
+          id: filterField
+          Layout.fillWidth: true
+          visible: root.hasUpdate && root.allSections.length > 0
+          placeholderText: "Filter packages  ( / )"
+          foreground: root.foreground
+          font.family: root.fontFamily
+          onTextChanged: {
+            root.filterText = text
+            if (panelFlick)
+              panelFlick.contentY = 0
+          }
+          // Esc clears a filter first and leaves the field second, so it takes
+          // two presses to close the panel from a filtered list, never one
+          // press that loses what was typed. Enter hands the keys back to the
+          // list so j and k scroll again.
+          Keys.onPressed: function (event) {
+            if (event.key === Qt.Key_Escape) {
+              if (text !== "")
+                text = ""
+              else
+                keyCatcher.forceActiveFocus()
+              event.accepted = true
+            } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+              keyCatcher.forceActiveFocus()
+              event.accepted = true
+            }
+          }
         }
 
         Flickable {
@@ -276,8 +361,51 @@ Panel {
             width: panelFlick.width
             spacing: Style.space(14)
 
+            // News first. It is the shorter list, and the one that goes away
+            // once read, where the packages stay until the update runs.
+            Column {
+              visible: root.newsCount > 0
+              width: column.width
+              spacing: Style.space(6)
+
+              PanelSectionHeader {
+                text: "NEWS  " + root.newsCount
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+
+              Text {
+                width: parent.width
+                text: "From omarchy.org/news. Click a post to open it, n marks them read."
+                textFormat: Text.PlainText
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+                bottomPadding: Style.space(2)
+              }
+
+              Repeater {
+                model: root.unreadNews
+                NewsRow {
+                  required property var modelData
+                  width: parent.width
+                  item: modelData
+                }
+              }
+
+              Button {
+                text: "Mark read"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                tooltipText: "Hides the newspaper until the next post"
+                onClicked: root.markNewsRead()
+              }
+            }
+
             Text {
-              visible: root.hasData && Model.sections(root.report).length === 0
+              visible: root.hasUpdate && root.hasData && root.allSections.length === 0
               width: parent.width
               text: "Nothing else is pending. Only Omarchy itself would change."
               textFormat: Text.PlainText
@@ -287,8 +415,19 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
+            Text {
+              visible: root.hasUpdate && root.filtering && root.allSections.length > 0 && root.shownSections.length === 0
+              width: parent.width
+              text: "No pending package matches \"" + Model.plain(root.filterText.trim(), 60) + "\"."
+              textFormat: Text.PlainText
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              wrapMode: Text.WordWrap
+            }
+
             Repeater {
-              model: root.hasData ? Model.sections(root.report) : []
+              model: root.hasUpdate ? root.shownSections : []
 
               Column {
                 required property var modelData
@@ -329,7 +468,7 @@ Panel {
             Text {
               visible: text !== ""
               width: parent.width
-              text: root.hasData ? Model.omittedNote(root.report) : ""
+              text: root.hasUpdate && root.hasData ? Model.omittedNote(root.report) : ""
               textFormat: Text.PlainText
               color: root.dim
               font.family: root.fontFamily
@@ -342,11 +481,13 @@ Panel {
 
         PanelSeparator {
           Layout.fillWidth: true
+          visible: root.hasUpdate
           foreground: root.foreground
         }
 
         Button {
           Layout.fillWidth: true
+          visible: root.hasUpdate
           text: root.hasData ? "Update now" : "Update now (unreviewed)"
           iconText: ""
           bordered: true
@@ -358,7 +499,17 @@ Panel {
 
         Text {
           Layout.fillWidth: true
-          text: "u update  .  r re-check  .  esc close"
+          text: {
+            var keys = []
+            if (root.hasUpdate)
+              keys.push("u update", "r re-check")
+            if (filterField.visible)
+              keys.push("/ filter")
+            if (root.newsCount > 0)
+              keys.push("n read")
+            keys.push("esc close")
+            return keys.join(" . ")
+          }
           textFormat: Text.PlainText
           color: Qt.darker(root.foreground, 2.0)
           font.family: root.fontFamily
@@ -439,6 +590,62 @@ Panel {
         font.pixelSize: Style.font.caption
         elide: Text.ElideRight
       }
+    }
+  }
+
+  // One post. Title, then date and the feed's one-line summary. The whole row
+  // opens the post, and only ever an omarchy.org link: openNews checks it
+  // again, here in the shell, whatever the script said.
+  component NewsRow: Item {
+    id: newsRow
+
+    property var item: null
+    readonly property bool opens: item ? Model.safeNewsLink(item.link) !== "" : false
+
+    implicitHeight: newsLabels.implicitHeight + Style.space(6)
+
+    Column {
+      id: newsLabels
+      anchors.left: parent.left
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      spacing: Style.space(1)
+
+      Text {
+        width: parent.width
+        text: newsRow.item ? newsRow.item.title : ""
+        textFormat: Text.PlainText
+        color: root.foreground
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.body
+        font.underline: newsMouse.containsMouse && newsRow.opens
+        wrapMode: Text.WordWrap
+        maximumLineCount: 2
+        elide: Text.ElideRight
+      }
+
+      Text {
+        width: parent.width
+        text: newsRow.item ? [Model.newsDate(newsRow.item.date), newsRow.item.summary].filter(function (part) {
+          return part !== ""
+        }).join("  .  ") : ""
+        textFormat: Text.PlainText
+        color: Qt.darker(root.foreground, 1.9)
+        font.family: root.fontFamily
+        font.pixelSize: Style.font.caption
+        wrapMode: Text.WordWrap
+        maximumLineCount: 2
+        elide: Text.ElideRight
+      }
+    }
+
+    MouseArea {
+      id: newsMouse
+      anchors.fill: parent
+      enabled: newsRow.opens
+      hoverEnabled: true
+      cursorShape: Qt.PointingHandCursor
+      onClicked: root.openNews(newsRow.item.link)
     }
   }
 }

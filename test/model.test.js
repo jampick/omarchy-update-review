@@ -288,4 +288,124 @@ test("sizes read the way a person writes them", function () {
 })
 
 console.log("")
+console.log("Model.filterSections")
+
+function filterDoc() {
+  return Model.sections(Model.parseReport(report({
+    packages: [pkg("linux", { tag: "reboot" }), pkg("qt6-base"), pkg("qt6-wayland"), pkg("zsh")],
+    aur: [pkg("yay-bin")]
+  })))
+}
+
+test("an empty filter leaves every section alone", function () {
+  var all = filterDoc()
+  assert.strictEqual(Model.filterSections(all, ""), all)
+  assert.strictEqual(Model.filterSections(all, "   "), all)
+})
+
+test("words match anywhere in the name, in any order and any case", function () {
+  var shown = Model.filterSections(filterDoc(), "BASE qt")
+  assert.strictEqual(Model.matchCount(shown), 1)
+  assert.strictEqual(shown[0].rows[0].name, "qt6-base")
+})
+
+test("sections with no match are dropped, and so are their notes", function () {
+  var shown = Model.filterSections(filterDoc(), "qt6")
+  assert.deepStrictEqual(shown.map(function (s) { return s.title }), ["EVERYTHING ELSE"])
+  assert.strictEqual(shown[0].note, "")
+  assert.strictEqual(Model.matchCount(shown), 2)
+})
+
+test("the AUR section is searched too", function () {
+  var shown = Model.filterSections(filterDoc(), "yay")
+  assert.deepStrictEqual(shown.map(function (s) { return s.title }), ["AUR"])
+})
+
+test("no match is an empty list, not an error", function () {
+  assert.deepStrictEqual(Model.filterSections(filterDoc(), "nothing-like-this"), [])
+  assert.deepStrictEqual(Model.filterSections(null, "x"), [])
+})
+
+console.log("")
+console.log("Model.parseNews")
+
+function newsDoc(items, extra) {
+  var doc = { ok: true, error: null, unread: 0, items: items }
+  var keys = Object.keys(extra || {})
+  for (var i = 0; i < keys.length; i++) doc[keys[i]] = extra[keys[i]]
+  return JSON.stringify(doc)
+}
+
+function post(title, extra) {
+  var item = { title: title, link: "https://omarchy.org/news/2026/10/post", summary: "s", date: 1792058400, unread: false }
+  var keys = Object.keys(extra || {})
+  for (var i = 0; i < keys.length; i++) item[keys[i]] = extra[keys[i]]
+  return item
+}
+
+test("garbage and oversize documents are refused", function () {
+  assert.strictEqual(Model.parseNews(""), null)
+  assert.strictEqual(Model.parseNews("<rss>"), null)
+  assert.strictEqual(Model.parseNews("[]"), null)
+  assert.strictEqual(Model.parseNews(newsDoc([post("x", { summary: "a".repeat(70 * 1024) })])), null)
+})
+
+test("unread is counted from the items, not taken from the document", function () {
+  var news = Model.parseNews(newsDoc([post("a", { unread: true }), post("b")], { unread: 40 }))
+  assert.strictEqual(news.unread, 1)
+  assert.deepStrictEqual(Model.unreadNews(news).map(function (i) { return i.title }), ["a"])
+})
+
+test("only a real true marks a post unread", function () {
+  var news = Model.parseNews(newsDoc([post("a", { unread: "true" }), post("b", { unread: 1 })]))
+  assert.strictEqual(news.unread, 0)
+})
+
+test("items are capped at ten and untitled ones skipped", function () {
+  var items = [post("")]
+  for (var i = 0; i < 30; i++) items.push(post("p" + i, { unread: true }))
+  var news = Model.parseNews(newsDoc(items))
+  assert.strictEqual(news.items.length, 10)
+  assert.strictEqual(news.items[0].title, "p0")
+})
+
+test("a failed fetch has no unread news to show", function () {
+  var news = Model.parseNews(newsDoc([post("a", { unread: true })], { ok: false }))
+  assert.deepStrictEqual(Model.unreadNews(news), [])
+  assert.deepStrictEqual(Model.unreadNews(null), [])
+})
+
+test("links are kept only for https omarchy.org", function () {
+  assert.strictEqual(Model.safeNewsLink("https://omarchy.org/news/2026/10/a-post"), "https://omarchy.org/news/2026/10/a-post")
+  assert.strictEqual(Model.safeNewsLink("http://omarchy.org/news/x"), "")
+  assert.strictEqual(Model.safeNewsLink("https://omarchy.org.evil.example/x"), "")
+  assert.strictEqual(Model.safeNewsLink("https://omarchy.org@evil.example/x"), "")
+  assert.strictEqual(Model.safeNewsLink("https://omarchy.org/x?$(id)"), "")
+  assert.strictEqual(Model.safeNewsLink("file:///etc/passwd"), "")
+  assert.strictEqual(Model.safeNewsLink("https://omarchy.org/" + "a".repeat(400)), "")
+  var news = Model.parseNews(newsDoc([post("a", { link: "javascript:alert(1)" })]))
+  assert.strictEqual(news.items[0].link, "")
+})
+
+test("titles lose control characters before they reach a Text", function () {
+  var news = Model.parseNews(newsDoc([post("a\u0007b\u001bc")]))
+  assert.strictEqual(news.items[0].title, "abc")
+})
+
+test("dates read as day and month, with the year only when it differs", function () {
+  var now = Date.UTC(2026, 9, 20)
+  assert.strictEqual(Model.newsDate(1792058400, now), "15 Oct")
+  assert.strictEqual(Model.newsDate(1792058400, Date.UTC(2027, 0, 5)), "15 Oct 2026")
+  assert.strictEqual(Model.newsDate(0, now), "")
+})
+
+test("the tooltip says which reason lit the icon", function () {
+  var doc = Model.parseReport(report({ packages: [pkg("zsh")] }))
+  assert.strictEqual(Model.barTooltip(doc, false, false, 0), "")
+  assert.strictEqual(Model.barTooltip(doc, false, false, 1), "1 new post on omarchy.org. Click to read.")
+  assert.ok(/pending/.test(Model.barTooltip(doc, false, true, 0)))
+  assert.ok(/2 new posts on omarchy\.org\.$/.test(Model.barTooltip(doc, false, true, 2)))
+})
+
+console.log("")
 console.log(passed + " passed" + (process.exitCode ? ", some failed" : ""))

@@ -272,6 +272,50 @@ check "clears pacman's abandoned empty download directories" "[[ ! -d \$sync/dow
 check "but leaves a recent one, which may be a download in flight" "[[ -d \$sync/download-new ]]"
 check "and never one with anything in it" "[[ -f \$sync/download-full/partial ]]"
 
+# --- news ------------------------------------------------------------------
+#
+# Against a fixture in --cached mode, so the suite never touches the network.
+
+echo
+echo "omarchy-update-news"
+
+nc=$stub/news-cache
+ns=$stub/news-state
+mkdir -p "$nc/omarchy-update-review"
+feed_fixture() {
+  cat >"$nc/omarchy-update-review/news.xml" <<FEED
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>Omarchy News</title>
+$1
+<item><title>Second post</title><link>https://omarchy.org.evil.example/x</link><pubDate>Fri, 09 Oct 2026 10:00:00 GMT</pubDate><description>two</description></item>
+<item><title>First post</title><link>https://omarchy.org/news/2026/10/first</link><pubDate>Thu, 08 Oct 2026 10:00:00 GMT</pubDate><description>one</description></item>
+</channel></rss>
+FEED
+}
+news() { XDG_CACHE_HOME=$nc XDG_STATE_HOME=$ns ./bin/omarchy-update-news "$@"; }
+
+feed_fixture '<item><title>Newest post</title><link>https://omarchy.org/news/2026/10/newest</link><pubDate>Thu, 15 Oct 2026 10:00:00 GMT</pubDate><description>three</description></item>'
+first=$(news --cached)
+check "emits valid JSON" "jq -e .ok >/dev/null <<<\"\$first\""
+check "lists posts newest first" "[[ \$(jq -r '.items[0].title' <<<\"\$first\") == 'Newest post' ]]"
+check "the first run counts only the newest post as unread" \
+  "jq -e '.unread == 1 and .items[0].unread and (.items[1].unread | not)' >/dev/null <<<\"\$first\""
+check "drops a link that is not omarchy.org" "[[ \$(jq -r '.items[1].link' <<<\"\$first\") == '' ]]"
+check "keeps one that is" "[[ \$(jq -r '.items[0].link' <<<\"\$first\") == 'https://omarchy.org/news/2026/10/newest' ]]"
+
+check "mark-read leaves nothing unread" "jq -e '.unread == 0' >/dev/null <<<\"\$(news --mark-read)\""
+check "and stays read" "jq -e '.unread == 0' >/dev/null <<<\"\$(news --cached)\""
+
+feed_fixture '<item><title>Later post</title><link>https://omarchy.org/news/2026/10/later</link><pubDate>Mon, 19 Oct 2026 10:00:00 GMT</pubDate></item>
+<item><title>Newest post</title><link>https://omarchy.org/news/2026/10/newest</link><pubDate>Thu, 15 Oct 2026 10:00:00 GMT</pubDate></item>'
+later=$(news --cached)
+check "a post published after that is unread again" \
+  "jq -e '.unread == 1 and .items[0].title == \"Later post\"' >/dev/null <<<\"\$later\""
+
+printf 'not xml at all' >"$nc/omarchy-update-review/news.xml"
+check "an unreadable feed is an error, still in JSON" \
+  "jq -e '.ok == false and .unread == 0' >/dev/null <<<\"\$(news --cached)\""
+
 # --- the producers, statically ---------------------------------------------
 
 echo
